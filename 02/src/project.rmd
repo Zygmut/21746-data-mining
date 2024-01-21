@@ -1,0 +1,316 @@
+---
+title: "Assignment 2"
+author: "Zygmut"
+date: "28-11-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+
+This assignment explores the Prestige data frame from the "car" package, aiming to analyze the relationship between variables, particularly focusing on the regression model with "income" as the dependent variable.
+
+## Pacakages
+```{r lib}
+library(car) # Data
+library(ggplot2) # Data plotting
+library(dplyr) # Data manipulation
+library(patchwork) # Plot layout
+library(purrr) # Functional programming
+library(corrplot) # Correlation plot
+library(RColorBrewer) # Nice color palette
+```
+
+## Load dataset
+```{r load_df}
+df <- Prestige
+```
+
+## 01
+```{r 01_summary}
+summary(df)
+str(df)
+```
+
+The data holds `102` observations and `6` varaibles with the following types:
+
+- education: `num`
+- income: `int`
+- women: `num`
+- prestige: `num`
+- census: `int`
+- type: `Factor` with classes [bc, prof, wc]
+
+Overall, the data makes sense for their respective categories; not having negative values nor extreme values; Though, `type` has 4 unexpected `NaN` values. Exploring the data could give us some insights on what values to asign to this missing types.
+
+```{r 01_NAN}
+(nan_values <- df[is.na(df$type), ])
+(nan_names <- row.names(nan_values))
+```
+
+Assuming that the labels are correct, we can assign manually each of the types:
+
+- **Athletes**: prof
+- **Newsboys**: bc
+- **Babysitters**: prof
+- **Farmers**: bc
+
+There's also the possibility to assign them by analyzing the relation between all of the other variables with our dependant varaible (income) but, for this exercise, I'll be using data interpretation and contextual analysis to fill in the values. I'll be using [deplyr](https://dplyr.tidyverse.org/) to mutate the data, as seen [here](https://dplyr.tidyverse.org/reference/mutate.html).
+
+```{r 01_clean}
+df <- df %>%
+  mutate(
+    type = case_when(
+      row.names(df) %in% c("athletes", "babysitters") ~ "prof",
+      row.names(df) %in% c("newsboys", "farmers") ~ "bc",
+      TRUE ~ type
+    )
+  )
+
+df[nan_names, ]
+```
+
+## 02
+
+The use of [ggpairs](https://www.rdocumentation.org/packages/GGally/versions/1.5.0/topics/ggpairs) or [pairs](https://www.rdocumentation.org/packages/graphics/versions/3.6.2/topics/pairs) could prove useful to show the relation of the whole dataframe. As to only showing the explicit data that we want to study, a more fine-grained method will be implemented.
+```{r 02}
+names_not_income <- setdiff(names(df), c("income", "type"))
+
+plots <- lapply(names_not_income, function(variable) {
+  ggplot(df, aes(x = .data[[variable]], y = income)) +
+    geom_point() +
+    labs(
+      title = paste(variable, " vs. income"),
+      x = variable,
+      y = "income"
+    )
+})
+
+# This uses the purrr package that allows us to combine all of the plots
+reduce(plots, `+`)
+```
+
+We left out `type` to use a more interesting plot, such as a boxplot. We're doing this as the `type` data is a *factor* and using a scatterplot wont give us a plot that is difficult to understand
+```{r 02_boxplot}
+ggplot(df, aes(x = type, y = income, fill = type)) +
+  geom_boxplot() +
+  labs(
+    title = "Boxplot of Income by Type",
+    x = "Type",
+    y = "Income"
+  )
+```
+
+A correlation graph could prove useful as to quicly examine what variables could ave priority when applying linear regressions.
+
+```{r 02_corr}
+corrplot(cor(df %>% select(-type)),
+  type = "upper",
+  order = "hclust",
+  col = brewer.pal(n = 8, name = "RdYlBu")
+)
+```
+
+## 03
+
+```{r 03_hist}
+ggplot(df, aes(x = income)) +
+  geom_histogram(binwidth = 1000) +
+  geom_vline(
+    xintercept = median(df$income),
+    color = "#10b7f4",
+    linetype = "dashed"
+  ) +
+  geom_vline(
+    xintercept = mean(df$income),
+    color = "#c03a09",
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Histogram of income",
+    x = "income",
+    y = "frequency"
+  )
+```
+
+The histogram presents a clear positive skew with meadian and mean values at around 6000 x respectivelly. This suggests that there are relatively few jobs with very high incomes.
+
+```{r 03_edu_boxplot}
+ggplot(df, aes(x = "", y = education)) +
+  geom_boxplot(fill = "#10b7f4") +
+  labs(
+    title = "Boxplot of education",
+    x = "",
+    y = "Education"
+  )
+```
+
+The boxplot shows a relatively normal distribution of the education from 8.5 to 12.5 aproximatelly, presenting some whiskers to the min and max values being 6.380 and 15.970 respectivelly.
+
+```{r 03_scatter}
+ggplot(df, aes(x = education, y = income)) +
+  geom_point() +
+  labs(
+    title = "Scatterplot of income vs. education",
+    x = "Education",
+    y = "Income"
+  )
+```
+
+```{r 03_linear_model}
+set.seed(27)
+linear_model <- lm(income ~ education, data = df)
+r_squared_linear <- summary(linear_model)$r.squared
+summary(linear_model)
+```
+
+Strangely, the intercept gives us a negative value, meaning that with zero years of experience you'd "owe" 2433.8 units of currency. As we're not expecting new observations outside of the current range, this wont affect the experiment. Had we wanted to predict values outside of this range, sacaling the education variable could help fix the issue
+
+The coefficient for education (898.8) suggests that, on average, for each one-unit increase in education, the income is expected to increase by 898.8 units.
+
+The p-value returned by the model (2.079e-10) is exceptionally good as its very close to zero, though the model expresses a very low R-squared value (0.3336), meaning that it only explains 33% of the variance in the data.
+
+```{r 03_scatter_with_model}
+ggplot(df, aes(x = education, y = income)) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = FALSE,
+    color = "#10b7f4",
+    linetype = "dashed"
+  ) +
+  labs(
+    title = "Scatterplot with Regression Line",
+    x = "Education",
+    y = "Income"
+  )
+```
+
+Visually, the model seems to not be fitting the observations as well as I wanted, as it doesn't follow the pattern of the whole plot. Altough only being a visual clue this can, in fact, mean that the best model is non-linear
+
+## 04
+
+```{r 04_poly_model}
+poly_model <- lm(income ~ poly(education, 2), data = df)
+r_squared_poly <- summary(poly_model)$r.squared
+
+ggplot(
+  df,
+  aes(x = education, y = income)
+) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ poly(x, 2),
+    se = FALSE,
+    color = "#10b7f4",
+    linetype = "dashed"
+  ) +
+  labs(x = "Education", y = "Income")
+
+
+summary(poly_model)
+```
+
+The p-value of the polinomial model is far closer to zero than the linear, suggesting that this model is better than the linear. This lower p-value suggests that the additional polynomial terms (in this case education^2) contribute significantly explanation of "income"
+
+Comparing the R^2 value we can conclude that:
+```{r 04_model_r2_comparison}
+better_model <- ifelse(
+  r_squared_poly > r_squared_linear,
+  "polynomial",
+  "linear"
+)
+
+cat("The", better_model, "model is better\n")
+```
+
+Though not by much (0.03), only improving the explanation of the variance by 3%. Evaluating this improvement, we can conclude that, even tough is technically better, the incremented complexity of using the polynomial regression doesn't justify its use.
+
+## 05
+
+Using purrr, we can apply functions over two inputs (education & income) as shown [here](https://purrr.tidyverse.org/reference/map2.html). Due to the `exp` function returning `Inf`, a sanity check is introduced using the `ifelse` conditional having for fallback the original values.
+```{r 05_transformed_data}
+methods <- c(
+  identity,
+  log,
+  sqrt,
+  exp,
+  function(x) x^2,
+  function(x) x^3,
+  function(x) x^4
+)
+
+transformed_data <- map2(
+  methods, methods,
+  ~ data.frame(
+    income = ifelse(
+      is.finite(.x(df$income)), .x(df$income), df$income
+    ),
+    education = ifelse(
+      is.finite(.y(df$education)), .y(df$education), df$education
+    )
+  )
+)
+```
+
+Having all the permutations, a list of structures holding the information of interest can be generated applying a function to each element of the trasnformed data.
+```{r 05_model_gen}
+models <- map(transformed_data, function(data) {
+  model <- lm(income ~ education, data = data)
+  return(list(
+    income = data$income,
+    education = data$education,
+    model = model,
+    r_squared = summary(model)$r.squared
+  ))
+})
+```
+
+For academic purposes, a sample of the models previously generated can be feteched and ploted with their respective linear models.
+```{r 05_model_plot}
+set.seed(5)
+sampled_data <- sample(models, size = 4)
+
+plots <- map(sampled_data, ~ {
+  ggplot(
+    as.data.frame(.x[c("income", "education")]),
+    aes(x = education, y = income)
+  ) +
+    geom_point() +
+    geom_smooth(
+      method = "lm",
+      formula = y ~ x,
+      se = FALSE,
+      color = "#10b7f4",
+      linetype = "dashed"
+    ) +
+    labs(x = "Education", y = "Income")
+})
+
+reduce(plots, `+`)
+```
+
+From the list of all the models, the best one can be found by selecting the one who posses the greater r squared
+```{r 05_best_model}
+best_model <- models[[which.max(map_dbl(models, "r_squared"))]]
+
+ggplot(
+  as.data.frame(best_model[c("income", "education")]),
+  aes(x = education, y = income)
+) +
+  geom_point() +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = FALSE,
+    color = "#10b7f4",
+    linetype = "dashed"
+  ) +
+  labs(x = "Education", y = "Income")
+
+summary(best_model$model)
+```

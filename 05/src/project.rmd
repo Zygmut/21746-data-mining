@@ -1,0 +1,536 @@
+---
+title: "Assignment 5"
+author: "Alejandro Medina Perelló, Zygmut"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this document we are going to explore a dataset featuring 8124 descriptions of hypothetical mushroom samples, spanning 23 species within the Agaricus and Lepiota Family. With a focus on edibility, the objective is to mine the data for association rules that effectively distinguish between edible and poisonous mushrooms. The central research question investigates the specific characteristics of edible and poisonous mushrooms. Parameters such as rule length, minimum support, and minimum confidence are considered, with a keen eye on eliminating redundant rules. The research aims to shed light on specific aspects that enable a practical and secure identification of mushrooms based on their particular characteristics.
+
+## Packages
+
+```{r load packages, message=FALSE}
+library(ggplot2)
+library(here)
+library(dplyr)
+library(purrr)
+library(glue)
+
+# Association rules
+library(arules)
+library(arulesViz)
+```
+
+## Helpers
+
+```{r pie plot helper}
+plot_pie_freq <- function(variable, plot_name) {
+  data <- data.frame(table(variable))
+
+  color_palette <- pals::stepped3(n = length(unique(variable)))
+  ggplot(data, aes(x = "", y = Freq, fill = variable)) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_text(
+      aes(x = 1.6, label = sprintf("%.1f%%", Freq / sum(Freq) * 100)),
+      position = position_stack(vjust = 0.5),
+      size = 4
+    ) +
+    coord_polar(theta = "y") +
+    labs(title = plot_name) +
+    scale_fill_manual(values = color_palette) +
+    theme_void() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    )
+}
+```
+
+```{r hist count features}
+plot_edible_features_count <- function(var, title) {
+  antecedents_list <- as(var, "list")
+
+  count_table <- table(unlist(antecedents_list))
+
+  count_df <- data.frame(
+    Item = names(count_table),
+    Apariciones = as.numeric(count_table)
+  )
+
+  count_df <- count_df[count_df$Apariciones > 0, ]
+
+  count_df <- count_df[order(count_df$Apariciones, decreasing = TRUE), ]
+
+  barplot(
+    count_df$Apariciones,
+    names.arg = count_df$Item,
+    main = title,
+    col = rainbow(length(count_df$Item)),
+    las = 2
+  )
+}
+```
+
+```{r pipeline helper}
+show_results <- function(rules, target) {
+  data <- subset(rules, rhs %pin% target)
+  data@quality$score <- hazard_cut(data@quality$confidence)
+  sure_rules <- subset(data, data@quality$score == "sure")
+
+  ant_df <- data.frame(Frequency = itemFrequency(slot(sure_rules, "lhs"))) |>
+    tibble::rownames_to_column(var = "Characteristic") |>
+    filter(Frequency > 0)
+
+  plot <- ggplot(
+    ant_df,
+    aes(x = "", y = Frequency, fill = Characteristic)
+  ) +
+    geom_bar(stat = "identity", width = 1) +
+    geom_text(
+      aes(x = 1.6, label = sprintf("%.1f%%", Frequency / sum(Frequency) * 100)),
+      position = position_stack(vjust = 0.5),
+      size = 4
+    ) +
+    coord_polar(theta = "y") +
+    labs(
+      title = glue("Antecedent Frequency of ", target, " Mushrooms")
+    ) +
+    scale_fill_manual(values = pals::stepped3(
+      n = length(unique(ant_df$Characteristic))
+    )) +
+    theme_void() +
+    theme(
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    )
+
+  return(list(
+    data.frame(
+      lhs = labels(lhs(sure_rules)),
+      rhs = labels(rhs(sure_rules)),
+      sure_rules@quality
+    ),
+    ant_df,
+    plot
+  ))
+}
+```
+
+```{r safe_ranges helper}
+hazard_cut <- function(data) {
+  breaks <- c(0, 0.8, 0.9999, 1)
+  labels <- c("unsure", "possible", "sure")
+
+  return(cut(
+    data,
+    breaks = breaks,
+    labels = labels,
+    include.lowest = TRUE
+  ))
+}
+```
+
+## Load dataset
+
+```{r load_df}
+set.seed(30)
+
+df <- read.csv(here("05", "data", "mushrooms.csv")) |>
+  mutate(across(where(is.character), as.factor))
+
+str(df)
+```
+
+## Na values and duplicated_data
+
+To ensure that the transactional representation is consistent with the logic of association rule algorithms and ensures more accurate and reliable results, it is necessary to avoid duplicate values and null values.
+
+```{r na_values}
+any(is.na(df))
+```
+
+Given the result of the previous cell, the dataset does not present any non numeric values
+
+```{r duplicated_data}
+any(duplicated(df))
+```
+
+And there are not duplicated observations either
+
+## Association rules
+
+As there aren't any issues in our dataset, we can convert it directly to a transactional format.
+
+```{r association_rules summary}
+transactions <- transactions(df)
+
+summary(transactions)
+```
+
+## Apriori
+
+We applied the Apriori algorithm to generate association rules, allowing us to discover patterns of behavior in our data. In our case, we used:
+
+- support: 0.2
+- confidence: 0.7
+- maximum length: 5
+
+```{r apriori association_rules}
+apriori <- list()
+
+apriori$rules <- transactions |>
+  apriori(
+    parameter = list(
+      support = 0.2,
+      confidence = 0.7,
+      maxlen = 5
+    ),
+    appearance = list(
+      rhs = c("type=edible", "type=poisonous"),
+      default = "lhs"
+    ),
+    control = list(verbose = FALSE)
+  ) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+```
+
+Further into the study we'll see the effects on changing these parameters.
+
+As to have a more semantic metric to identify how confident we're to a given mushroom being edible or not, we'll be adding a `score` metric that groups some ranges of the confidence values stating if we're
+
+- sure
+- possible
+- unsure
+
+if a given mushroom is edible or not.
+
+```{r apriori association_rules score}
+apriori$rules@quality$score <- hazard_cut(apriori$rules@quality$confidence)
+```
+
+We'll also separate the `edible` rules from the `poisonous` as to better handle these data
+
+```{r apriori association_rules edible}
+apriori$edible <- list()
+apriori$edible$rules <- subset(apriori$rules, rhs %pin% "edible")
+inspect(head(apriori$edible$rules, by = "confidence"))
+
+plot(apriori$edible$rules, method = "graph")
+plot_pie_freq(apriori$edible$rules@quality$score, "Score distribution")
+```
+
+```{r association_rules apriori poisonous}
+apriori$poisonous <- list()
+apriori$poisonous$rules <- subset(apriori$rules, rhs %pin% "poisonous")
+inspect(head(apriori$poisonous$rules, by = "confidence"))
+plot(apriori$poisonous$rules, method = "graph")
+plot_pie_freq(apriori$poisonous$rules@quality$score, "Score distribution")
+```
+
+In both graphs, it's noticeable that over half of the rules exhibit a confidence level of 1, as they fall into the `sure` category.
+
+
+### Antecedents
+
+Now that we hold the edible and poisonous data transaction subsets, well be using the `score` metric to filter these subsets and taking the left hand side, i.e. the antecedents. As such, these are the antecedents that define edible mushrooms:
+
+```{r edible sure}
+apriori$edible$antecedents <- list()
+apriori$edible$antecedents$content <- slot(
+  subset(
+    apriori$edible$rules,
+    apriori$edible$rules@quality$score == "sure"
+  ),
+  "lhs"
+)
+
+inspect(head(apriori$edible$antecedents$content))
+```
+
+And poisonous mushrooms
+
+```{r poisonous sure}
+apriori$poisonous$antecedents <- list()
+apriori$poisonous$antecedents$content <- slot(
+  subset(
+    apriori$poisonous$rules,
+    apriori$poisonous$rules@quality$score == "sure"
+  ),
+  "lhs"
+)
+
+inspect(head(apriori$poisonous$antecedents$content))
+```
+
+To better understand the proportion of each individual antecedent, we'll use a piechart
+
+```{r edible frequency_data_frame}
+apriori$edible$antecedents$freq_df <- data.frame(
+  Frequency = itemFrequency(apriori$edible$antecedents$content)
+) |>
+  tibble::rownames_to_column(var = "Characteristic") |>
+  filter(Frequency > 0)
+
+ggplot(
+  apriori$edible$antecedents$freq_df,
+  aes(x = "", y = Frequency, fill = Characteristic)
+) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_text(
+    aes(x = 1.6, label = sprintf("%.1f%%", Frequency / sum(Frequency) * 100)),
+    position = position_stack(vjust = 0.5),
+    size = 4
+  ) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Antecedent Frequency of Edible Mushrooms"
+  ) +
+  scale_fill_manual(values = pals::stepped3(
+    n = length(unique(apriori$edible$antecedents$freq_df$Characteristic))
+  )) +
+  theme_void() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+plot_edible_features_count(
+  apriori$edible$antecedents$content,
+  title = "Total Count of Appearances of Features in Antecedents"
+)
+```
+
+Regarding edible mushrooms, the dominant features are `habitat=woods` and `odor=none` with almost 20% of appearances throughout the rules, precisely 12 occurrences.
+
+```{r poisonous frequecy_data_frame}
+apriori$poisonous$antecedents$freq_df <- data.frame(
+  Frequency = itemFrequency(apriori$poisonous$antecedents$content)
+) |>
+  tibble::rownames_to_column(var = "Characteristic") |>
+  filter(Frequency > 0)
+
+ggplot(
+  apriori$poisonous$antecedents$freq_df,
+  aes(x = "", y = Frequency, fill = Characteristic)
+) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_text(
+    aes(x = 1.6, label = sprintf("%.1f%%", Frequency / sum(Frequency) * 100)),
+    position = position_stack(vjust = 0.5),
+    size = 4
+  ) +
+  coord_polar(theta = "y") +
+  labs(
+    title = "Antecedent Frequency of Poisonous Mushrooms"
+  ) +
+  scale_fill_manual(values = pals::stepped3(
+    n = length(unique(apriori$poisonous$antecedents$freq_df$Characteristic))
+  )) +
+  theme_void() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+```{r}
+plot_edible_features_count(
+  apriori$poisonous$antecedents$content,
+  title = "Recuento Total de Apariciones de Características en Antecedentes"
+)
+```
+
+Now, looking at poisonous mushrooms, we see that the most frequently appearing features are `gill_space=close` with approximately 16% of occurrences and `ring_type=evanescent` with 13.4%.
+
+
+However, we cannot assert that `gill_space=close` is a data point exclusively related to poisonous mushrooms, as it also appears in the graph for edible ones with nearly 9% frequency. We can only assume that it is more likely to be associated with poisonous mushrooms. This observation leads us to the conclusion that it is the combination of this characteristic with others that determines whether a mushroom is poisonous or not.
+
+
+### Parameter mutation
+
+As previously said, we'll slightly mutate the starting parameters of the `apriori` algoritmh to see the underlying effects
+
+```{r apriori parameter_mutation support}
+support_rules <- transactions |>
+  apriori(
+    parameter = list(
+      support = 0.27,
+      confidence = 0.4,
+      maxlen = 5
+    ),
+    appearance = list(
+      rhs = c("type=edible", "type=poisonous"),
+      default = "lhs"
+    ),
+    control = list(verbose = FALSE)
+  ) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+show_results(support_rules, "edible")
+show_results(support_rules, "poisonous")
+```
+
+With these changes, we observe a significant reduction in the set of characteristics. For edibles, `odor=none` remains dominant. In the graph for poisonous mushrooms, we now only have two characteristics with equal weight: `gill_space=close`, as we previously noted, and `stalk_surface_above_ring=silky`.
+
+These results are especially due to the confidence, as when it is lower, the rules are less specific.
+
+```{r apriori parameter_mutation confidence}
+confidence_rules <- transactions |>
+  apriori(
+    parameter = list(
+      support = 0.2,
+      confidence = 0.1,
+      maxlen = 5
+    ),
+    appearance = list(
+      rhs = c("type=edible", "type=poisonous"),
+      default = "lhs"
+    ),
+    control = list(verbose = FALSE)
+  ) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+show_results(confidence_rules, "edible")
+show_results(confidence_rules, "poisonous")
+```
+
+We can observe that, although we have reduced the confidence compared to the first graph shown, we still have the same distribution.
+
+```{r apriori parameter_mutation max_len}
+maxlen_rules <- transactions |>
+  apriori(
+    parameter = list(
+      support = 0.2,
+      confidence = 0.1,
+      maxlen = 3
+    ),
+    appearance = list(
+      rhs = c("type=edible", "type=poisonous"),
+      default = "lhs"
+    ),
+    control = list(verbose = FALSE)
+  ) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+show_results(maxlen_rules, "edible")
+show_results(maxlen_rules, "poisonous")
+```
+
+Reducing the length of the rules leads to much more equitable distributions for both graphs. In edible mushrooms, we have 6 variables, each with a 16.7% occurrence, while in poisonous mushrooms, there are 9 variables, with 4 having a 7.1% occurrence and 5 with a 14.3% occurrence.
+
+Again we see that some characteristics are common in both types of mushrooms. In this case, `stalk_shape=tapering`, so this feature alone would not provide us with specific information.
+
+
+## Eclat
+
+We applied the Eclat algorithm to generate association rules, allowing us to discover patterns of behavior in our data. In our case, we used:
+
+- support: 0.2
+- confidence: 0.7
+- maximum length: 5
+
+```{r association_rules eclat}
+eclat <- transactions |>
+  eclat(
+    parameter = list(
+      support = 0.2,
+      maxlen = 5
+    ),
+    control = list(verbose = FALSE)
+  ) |>
+  ruleInduction(confidence = 0.7) |>
+  subset(rhs %in% c("type=edible", "type=poisonous")) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+show_results(eclat, "edible")
+show_results(eclat, "poisonous")
+```
+
+We observe that applying Eclat with the same support and rule length as the Apriori algorithm yields the same distribution of characteristics. This consistency adds weight to the results, helping to determine which features are indicative of whether a mushroom is edible or not.
+
+### Parameter mutation
+
+We'll create the same mutations to compare them to the apriori results
+
+```{r eclat parameter_mutation support}
+support_rules <- transactions |>
+  eclat(
+    parameter = list(
+      support = 0.27,
+      maxlen = 5
+    ),
+    control = list(verbose = FALSE)
+  ) |>
+  ruleInduction(confidence = 0.4) |>
+  subset(rhs %in% c("type=edible", "type=poisonous")) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+
+show_results(support_rules, "edible")
+show_results(support_rules, "poisonous")
+```
+
+```{r eclat parameter_mutation confidence}
+confidence_rules <- transactions |>
+  eclat(
+    parameter = list(
+      support = 0.2,
+      maxlen = 5
+    ),
+    control = list(verbose = FALSE)
+  ) |>
+  ruleInduction(confidence = 0.1) |>
+  subset(rhs %in% c("type=edible", "type=poisonous")) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+show_results(confidence_rules, "edible")
+show_results(confidence_rules, "poisonous")
+```
+
+```{r eclat parameter_mutation max_len}
+maxlen_rules <- transactions |>
+  eclat(
+    parameter = list(
+      support = 0.2,
+      maxlen = 3
+    ),
+    control = list(verbose = FALSE)
+  ) |>
+  ruleInduction(confidence = 0.1) |>
+  subset(rhs %in% c("type=edible", "type=poisonous")) %>%
+  subset(!is.redundant(.)) |>
+  sort(decreasing = TRUE, by = "confidence")
+
+
+show_results(maxlen_rules, "edible")
+show_results(maxlen_rules, "poisonous")
+```
+
+Throughout the transformations, it has been observed that results similar to the Apriori method are produced. This suggests that the relationships between elements are clear enough. These are indicators that the obtained association rules are robust.
+
+## Conclusions
+
+To process the data we had, we initially checked the data's integrity to ensure the absence of null and duplicate values. After confirming their correctness, we transformed the data into a transactional format to carry out the Apriori method in order to derive association rules. Following this, we segmented the rules based on the given confidence intervals and observed the rules with confidence equal to 1 to identify the characteristics that determine whether a food item is edible or poisonous.
+
+Throughout the practice, challenges arose, particularly in understanding the concepts of confidence and support in the Apriori algorithm. We also had to investigate and study how to interpret the generated association rules.
+
+

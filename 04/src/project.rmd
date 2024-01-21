@@ -1,0 +1,562 @@
+---
+title: "Assignment 4"
+author: "Alejandro Medina Perelló, Zygmut"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+
+This project aims to uncover natural groupings within a dataset of penguin measurements from the Palmer Archipelago using the following clustering methods:
+
+- Partitional
+  - Kmeans
+  - PAM
+  - DBSCAN
+- Hierarchical
+  - hclust
+  - Agnes
+  - Diana
+
+We aim to find the best cluster for each method by varying the input parameters.
+
+## Packages
+```{r lib, warning=FALSE}
+library(GGally)
+library(factoextra)
+library(tidymodels)
+library(cluster)
+library(caret)
+library(patchwork) # Plot composer
+library(glue) # String formatting
+library(here) # Better loocalization of files
+library(dbscan) # Density based cluster
+library(dendextend) # Color dedongram by cluster
+```
+
+## Load dataset
+```{r load_df}
+set.seed(30)
+
+df <- read.csv(here("04", "data", "penguindata.csv"))
+
+summary(df)
+str(df)
+```
+
+## Cleaning process
+
+### Non interesting values
+
+To streamline the analysis, non-informative values such as unique identifiers `X` are excluded from the dataset
+
+```{r non_values}
+df <- df |> select(-X)
+```
+
+### Nan values
+
+This code snippet helps pinpoint columns containing `NaN` values, facilitating a more targeted exploration of missing data in the dataset.
+```{r nan_values}
+df |>
+  select(where(~ any(is.na(.)))) |>
+  mutate(across(where(is.character), as.factor)) |>
+  summary()
+```
+
+As the dataset has `NaN` values, we'll study each case
+
+#### Sex
+
+As the sex observations are not balanced, we randomly assigned `male` or `female` labels to the missing values ensuring a balanced distribution in the dataset
+
+```{r sex_relabeling}
+df <- df |>
+  mutate(sex = ifelse(
+    is.na(sex),
+    sample(unique(na.omit(df$sex)), sum(is.na(sex)), replace = TRUE),
+    as.character(sex)
+  ))
+
+df |> count(sex)
+```
+
+#### Numerical values
+
+To address the missing data of our dataset, we've chosen to replace the missing values using the mean value of the given variable
+
+```{r num_nans}
+df <- df |>
+  mutate(across(
+    where(is.numeric) | where(is.integer),
+    ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+  ))
+
+df |>
+  select(where(is.numeric) | where(is.integer)) |>
+  summary()
+```
+
+### One-hot encoding
+
+As to have all the dataset be of numeric representation, we will employ a one-hot encoding technique to convert all character-based variables into numeric values
+
+```{r one_hot_encoding}
+# https://www.statology.org/one-hot-encoding-in-r/
+df <- data.frame(predict(dummyVars(" ~ .", data = df), newdata = df))
+
+summary(df)
+```
+
+### Normalization
+
+As the final step, we will normalize each numerical value within our dataset; as this is a crucial step to cluster data; avoiding high value variables
+
+```{r norm_data}
+df <- scale(df)
+```
+
+Finally we can re-inspect the whole dataset
+
+```{r summary}
+summary(df)
+```
+
+## Clustering
+
+We employed a framework in the application of clustering for each method, outlined as follows:
+
+1. Definition of helper functions: Such as polting or applying clustering to follow our framework
+2. Generation of a list of all clustering data given the available parameters permutations: By defining some sensible ranges that fall above of what we're expecting, as to not apply a bias to the parameters by defining our expected result. This, altought being more computational expensive, will allow us to search exhaustively the domain of clusters to find the best one.
+3. Illustration of a sample of the clustering data.
+4. Identification of the optimal clustering data through the evaluation of the **silhouette sum**: Using the sum of silhouettes as our performance metric for its capability to gauge the quality of clusters by assessing both cohesion and separation.
+
+### Partitional
+
+As to have cohesion in styling when plotting all the data, the following function was developed
+
+```{r best_cluster_count_pipeline}
+display_cluster <- function(n_clusters, cluster_data, dataset) {
+  fviz_cluster(
+    object = cluster_data,
+    data = dataset,
+    geom = "point",
+    show.clust.cent = TRUE,
+    ellipse.type = "convex"
+  ) +
+    labs(title = glue("{n_clusters} clusters")) + # nolint
+    theme_minimal() + # nolint
+    theme( # nolint
+      axis.text.x = element_blank(), # nolint
+      axis.text.y = element_blank(),
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5) # nolint
+    )
+}
+```
+
+#### K-means
+
+We will perform the k-means function on our dataset, and within the function, we will experiment with different parameters to achieve the most accurate grouping possible.
+
+```{r kmeans helpers}
+perform_kmeans <- function(data, num_clusters, nstart) {
+  cluster_data <- kmeans(data, num_clusters, nstart)
+  return(list(
+    num_clusters = num_clusters,
+    nstart = nstart,
+    silhouette = sum(
+      data.frame(silhouette(cluster_data$cluster, dist(data)))$sil_width
+    )
+  ))
+}
+```
+
+```{r kmeans metrics}
+param_combinations <- expand.grid(
+  clusters = 2:10,
+  nstart = seq(5, 75, 5)
+)
+
+kmeans_metrics <- bind_rows(
+  pmap(
+    param_combinations, ~ perform_kmeans(df, ..1, ..2)
+  )
+)
+
+head(kmeans_metrics, n = 5)
+```
+
+```{r kmeans sample plots, warning=FALSE}
+# https://stackoverflow.com/a/53751880
+fviz_nbclust(
+  x = df,
+  FUNcluster = kmeans,
+  method = "wss",
+  k.max = 10,
+  diss = dist(df, method = "manhattan")
+)
+
+cluster_sample <- kmeans_metrics |>
+  slice_sample(n = 6, replace = FALSE)
+
+plots <- pmap(
+  cluster_sample,
+  function(num_clusters, nstart, silhouette) {
+    display_cluster(num_clusters, kmeans(df, num_clusters, nstart = nstart), df)
+  }
+)
+
+reduce(plots, `+`) +
+  plot_annotation(
+    title = "Kmeans Clustering of Penguins across potential number of clusters",
+  )
+```
+
+```{r kmeans best, warning=FALSE}
+(best_result <- kmeans_metrics[which.max(kmeans_metrics$silhouette), ])
+
+display_cluster(
+  best_result$num_clusters,
+  kmeans(df, best_result$num_clusters, nstart = best_result$nstart),
+  df
+)
+```
+
+After conducting an exhaustive search of parameter combinations, we have concluded that 4 clusters is the optimal grouping for our data.
+
+#### Partitioning Around Medoids (PAM)
+
+We will perform the k-medoids function on our dataset, and within the function, we will once again use different parameters in order to seek improved results.
+
+```{r pam helpers}
+perform_pam <- function(data, n_clusters) {
+  cluster_data <- pam(data, n_clusters)
+  return(list(
+    num_clusters = n_clusters,
+    silhouette = sum(data.frame(silhouette(cluster_data, dist(data)))$sil_width)
+  ))
+}
+```
+
+```{r pam metrics}
+pam_metrics <- bind_rows(
+  map(2:6, function(x) perform_pam(df, x))
+)
+
+head(pam_metrics, n = 5)
+```
+
+```{r pam sample plots, warning=FALSE}
+fviz_nbclust(
+  x = df,
+  FUNcluster = pam,
+  method = "wss",
+  k.max = 10,
+  diss = dist(df, method = "manhattan")
+)
+
+plots <- map(
+  1:6,
+  function(x) {
+    display_cluster(
+      x,
+      pam(df, x),
+      df
+    )
+  }
+)
+
+reduce(plots, `+`) +
+  plot_annotation(
+    title = "Pam Clustering of Penguins across potential number of clusters",
+  )
+```
+
+```{r pam best, warning=FALSE}
+(best_result <- pam_metrics[which.max(pam_metrics$silhouette), ])
+
+display_cluster(best_result$num_clusters, pam(df, best_result$num_clusters), df)
+```
+
+We observe that with this algorithm, we continue to see that 4 clusters are the ones that best adapt to our data.
+
+#### DBSCAN
+
+```{r dbscan helpers}
+perform_dbscan <- function(eps, min_pts, data) {
+  dbscan_result <- dbscan(data, eps = eps, minPts = min_pts)
+  return(list(
+    eps = eps,
+    minPts = min_pts,
+    silhouette = sum(
+      data.frame(silhouette(dbscan_result$cluster, dist(data)))$sil_width
+    ),
+    num_clusters = length(unique(dbscan_result$cluster)) - 1
+  ))
+}
+```
+
+```{r dbscan metrics}
+param_combinations <- expand.grid(
+  eps = seq(0.1, 2, 0.1),
+  min_pts = 1:10
+)
+
+dbscan_metrics <- bind_rows(
+  pmap(param_combinations, ~ perform_dbscan(..1, ..2, df))
+)
+
+head(dbscan_metrics, n = 5)
+```
+
+```{r dbscan sample plots}
+cluster_sample <- dbscan_metrics |>
+  slice_sample(n = 6, replace = FALSE)
+
+plots <- pmap(
+  cluster_sample,
+  function(eps, minPts, silhouette, num_clusters) {
+    display_cluster(num_clusters, dbscan(df, eps = eps, minPts = minPts), df)
+  }
+)
+
+reduce(plots, `+`) +
+  plot_annotation(
+    title = "DBSCAN Clustering of Penguins across potential number of clusters",
+  )
+```
+
+```{r dbscan best, warning=FALSE}
+(best_result <- dbscan_metrics[which.max(dbscan_metrics$silhouette), ])
+
+display_cluster(
+  best_result$num_clusters,
+  dbscan(df, best_result$eps, best_result$minPts),
+  df
+)
+```
+
+With the DBSCAN method, we once again find that 4 clusters are the number that best fits our data. As an additional insight, with this algorithm, we can also observe that there are two points considered as noise, meaning they do not belong to any cluster. This adds to the robustness of the model compared to the two previously used methods
+
+### Hierarchical
+
+#### Hclust
+
+We performed an agglomerative hierarchical clustering of the data and assessed its performance based on the silhouette.
+
+```{r hclust}
+perform_hclust <- function(data, method, num_clusters) {
+  hc <- hclust(dist(data), method = method)
+  hc <- cutree(hc, k = num_clusters)
+  return(list(
+    method = method,
+    num_clusters = num_clusters,
+    silhouette = sum(data.frame(silhouette(hc, dist(data)))$sil_width)
+  ))
+}
+
+plot_hclust <- function(data, method, num_clusters) {
+  hc <- as.dendrogram(hclust(dist(data), method = method))
+  hc <- color_branches(hc, k = num_clusters)
+  labels(hc) <- NULL
+
+  # Customize the ggplot dendrogram
+  fviz_dend(
+    hc,
+    main = glue("Clusters: {num_clusters}\nMethod: {method}"),
+    show_labels = FALSE
+  ) +
+    theme( # nolint
+      plot.title = element_text(size = 14, hjust = 0.5), # nolint
+    )
+}
+```
+
+We will perform hierarchical analysis with various combinations of parameters and save the compiled metrics for comparison. We will use this analysis with different methods: "single", "complete", "average", "mcquitty", "median", "centroid". `ward.D` and `ward.D2`, though yielding the best results (only 1 point better), were excluded from the study as their cluster data resulted in very difficult to comprehend plots
+
+```{r hclust metrics}
+parameters <- expand.grid(
+  method = c(
+    # "ward.D", "ward.D2",
+    "single", "complete", "average", "mcquitty", "median", "centroid"
+  ),
+  num_clusters = 2:10
+)
+
+hclust_metrics <- bind_rows(
+  pmap(parameters, ~ perform_hclust(df, ..1, ..2))
+)
+
+head(hclust_metrics, n = 5)
+```
+
+
+```{r hclust sample plots, warning=FALSE}
+cluster_sample <- hclust_metrics |>
+  slice_sample(n = 6, replace = FALSE) |>
+  mutate(method = as.character(method))
+
+# Apply the function to each row of the tibble
+plots <- pmap(
+  cluster_sample,
+  function(method, num_clusters, silhouette) plot_hclust(df, method, num_clusters)
+)
+
+reduce(plots, `+`)
+```
+
+```{r hclust best, warning=FALSE}
+(best_result <- hclust_metrics[which.max(hclust_metrics$silhouette), ])
+
+plot_hclust(df, best_result$method, best_result$num_clusters)
+```
+
+Based on the analysis of metrics, we can conclude that with the hierarchical algorithm, the best number of clusters obtained is 4, using the complete method.
+
+#### Agnes
+
+We perform hierarchical analysis with the Agglomerative Nesting algorithm (agnes), and we will evaluate the performance using the silhouette metric once again. We will conduct this analysis with different methods: 'average,' 'single,' 'complete,' 'weighted,' and with the number of clusters ranging from 2 to 10
+
+```{r agnes helpers}
+perform_agnes <- function(data, method, num_clusters) {
+  hc <- agnes(data, method = method)
+  hc <- cutree(hc, k = num_clusters)
+  return(list(
+    method = method,
+    num_clusters = num_clusters,
+    silhouette = sum(data.frame(silhouette(hc, dist(data)))$sil_width)
+  ))
+}
+
+plot_agnes <- function(data, method, num_clusters) {
+  hc <- as.dendrogram(agnes(dist(data), method = method))
+  hc <- color_branches(hc, k = num_clusters)
+
+  # Customize the ggplot dendrogram
+  fviz_dend(
+    hc,
+    main = glue("Clusters: {num_clusters}\nMethod: {method}"),
+    show_labels = FALSE
+  ) +
+    theme( # nolint
+      plot.title = element_text(size = 14, hjust = 0.5), # nolint
+    )
+}
+```
+
+```{r agnes metrics}
+parameters <- expand.grid(
+  method = c(
+    "average", "single", "complete", "weighted"
+  ),
+  num_clusters = 2:10
+)
+
+agnes_metrics <- bind_rows(
+  pmap(parameters, ~ perform_agnes(df, ..1, ..2))
+)
+
+head(agnes_metrics, n = 5)
+```
+
+```{r agnes sample plots, warning=FALSE}
+cluster_sample <- agnes_metrics |>
+  slice_sample(n = 6, replace = FALSE) |>
+  mutate(method = as.character(method))
+
+plots <- pmap(
+  cluster_sample,
+  function(method, num_clusters, silhouette) plot_agnes(df, method, num_clusters)
+)
+
+reduce(plots, `+`)
+```
+
+```{r agnes best, warning=FALSE}
+(best_result <- agnes_metrics[which.max(agnes_metrics$silhouette), ])
+
+plot_agnes(df, best_result$method, best_result$num_clusters)
+```
+
+With the agnes method, we can observe a result similar to hclust, with the best outcome being 4 clusters using the complete method. However, the way the data is agglomerated is inverse, this could be because the agnes method focuses on agglomerative nesting, meaning that it first joins the most similar objects and then groups those clusters into larger clusters. In this case, we can see how it joins the last cluster at the end of the dendrogram, whereas in hclust, the one that joined last was the first.
+
+#### Diana
+
+As the last algorithm, we will use DIANA, DIvisive ANAlysis. We will also use different parameters, such as metrics: "Euclidean" and "Manhattan", and a number of clusters ranging from 2 to 10.
+
+With this method, we focus on taking a large group and progressively dividing it into smaller subgroups, which is contrary to the previous methods where we focused on combining smaller clusters to obtain larger ones.
+
+```{r diana helpers}
+perform_diana <- function(data, metric, num_clusters) {
+  hc <- diana(data, metric = metric)
+  hc <- cutree(hc, k = num_clusters)
+  return(list(
+    metric = metric,
+    num_clusters = num_clusters,
+    silhouette = sum(data.frame(silhouette(hc, dist(data)))$sil_width)
+  ))
+}
+
+plot_diana <- function(data, metric, num_clusters) {
+  hc <- as.dendrogram(diana(data, metric = metric))
+  hc <- color_branches(hc, k = num_clusters)
+
+  # Customize the ggplot dendrogram
+  fviz_dend(
+    hc,
+    main = glue("Clusters: {num_clusters}\nMetric: {metric}"),
+    show_labels = FALSE
+  ) +
+    theme( # nolint
+      plot.title = element_text(size = 14, hjust = 0.5), # nolint
+    )
+}
+```
+
+```{r diana metrics}
+parameters <- expand.grid(
+  metric = c("euclidean", "manhattan"),
+  num_clusters = 2:10
+)
+
+diana_metrics <- bind_rows(
+  pmap(parameters, ~ perform_diana(df, ..1, ..2))
+)
+
+head(diana_metrics, n = 5)
+```
+
+```{r diana sample plots, warning=FALSE}
+cluster_sample <- diana_metrics |>
+  slice_sample(n = 6, replace = FALSE) |>
+  mutate(metric = as.character(metric))
+
+plots <- pmap(
+  cluster_sample,
+  function(metric, num_clusters, silhouette) plot_diana(df, metric, num_clusters)
+)
+
+reduce(plots, `+`)
+```
+
+```{r diana best, warning=FALSE}
+(best_result <- diana_metrics[which.max(diana_metrics$silhouette), ])
+
+plot_diana(df, best_result$metric, best_result$num_clusters)
+```
+
+Once again, we find that the optimal number of clusters is 4. This result has been consistent throughout the entire study, and in this particular case, the metric used was Manhattan.
+
+## Conclusion
+
+For the resolution of the assessment, we had to start by cleaning the dataset to understand its content and structure. We began by removing variables that did not contribute information. Checking the presence of non numeric values, we found non numeric values in the `sex` attribute. We faced the dilemma of how to handle it; Since it was of type `chr`, direct replacement with the mean or median was not possible. Therefore, we decided to apply data balancing and use one-hot encoding to address this issue. For the subsequent attributes with non numeric values that were of numeric type, we simply replaced them with the mean of the respective attributes. Finally, we normalize the data, thus concluding the processing and cleaning of the dataset.
+
+To perform clustering, we followed a framework in which we implemented the clustering function for all types. We also created helper functions to perform each clustering multiple times with different parameters, aiming to make each model as well-fitted as possible. Finally, we displayed several executions for comparison and showcased the best result obtained from each clustering.
+
+As a conclusion of the study, we observe that the most suitable choice for this dataset is to create 4 clusters. This deduction arises from the fact that, across all the metric combinations we have tested for all models, 4 clusters has consistently yielded the best result.

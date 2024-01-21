@@ -1,0 +1,501 @@
+---
+title: "Assignment 3"
+author: "Alejandro Medina Perelló, Zygmut"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+
+This assignment explores the Cirrhosis dataset. The research question focuses on predicting the survival state of patients with liver cirrhosis using classification models like:
+
+- Perceptrons
+- Decision trees
+- Nearest neighbors
+- etc
+
+The assignment emphasizes the comparison of models and seeks to determine the best-performing model for predicting patient survival.
+
+## Packages
+```{r lib}
+library(GGally)
+library(tidymodels)
+```
+
+## Load dataset
+```{r load_df}
+df <- read.csv("C:\\Users\\Eden\\Documents\\projects\\21746-data-mining\\03\\data\\cirrhosis.csv")
+
+summary(df)
+str(df)
+```
+
+## Cleaning process
+
+### Non interesting values
+
+To streamline the analysis, non-informative values such as unique identifiers `ID` are excluded from the dataset
+```{r non_values}
+df <- df |> select(-ID)
+```
+
+
+### Categorical reconstruction
+
+Given our research question focused on predicting whether an individual is alive after a certain period, we can simplify the survival classes by merging `CL` into `C`
+
+```{r categories}
+df <- df |> mutate(Status = ifelse(Status == "CL", "C", Status))
+
+summary(tibble(Status = as.factor(df$Status)))
+```
+
+### Nan values
+
+This code snippet helps pinpoint columns containing NaN values, facilitating a more targeted exploration of missing data in the dataset.
+```{r nan_values}
+na_counts <- tibble(
+  column = names(df),
+  nan_count = colSums(is.na(df))
+)
+
+as.data.frame(na_counts[na_counts$nan_count > 0, ])
+```
+
+As the dataset has `NaN` values, we'll study each case
+
+#### Non Drug patients
+
+We'll mutate the data from the 106 patients that didn't take the drug as a new category `None`.
+```{r test}
+faulty_data <- df |>
+  filter(is.na(Drug)) |>
+  select(where(~ all(is.na(.))))
+
+summary(
+  as.data.frame(faulty_data |> mutate(across(where(is.character), as.factor)))
+)
+```
+
+We can se that all of the patients that didn't took the drug have `Drug`, `Ascites`, `Hepatomegaly`, `Spiders`, `Cholesterol`, `Copper`, `Alk_Phos`, `SGOT` and `Tryglicerides` as `NaN`. We'll replace these `NaN` values to `None` in case of the character based variables and the `mean` to the numeric ones; As we don't want to loose this data and we can easily identify who was in the study or not.
+
+```{r mutate}
+df <- df |> mutate_at(
+  vars(all_of(faulty_data |> select(where(is.character)) |> colnames())),
+  ~ ifelse(is.na(.), "None", .)
+)
+
+df <- df |> mutate_at(
+  vars(all_of(
+    faulty_data |> select(where(is.numeric) | where(is.integer)) |> colnames()
+  )),
+  ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+)
+
+summary(df[c("Cholesterol", "Copper", "Alk_Phos", "SGOT", "Tryglicerides")])
+```
+
+#### Platelets & Prothrombin
+
+We'll use the same method as above to the numerical values `Platelets` and `Prothrombin`
+```{r int_nan}
+df <- df |> mutate_at(
+  vars(all_of(c("Platelets", "Prothrombin"))),
+  ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+)
+
+summary(df[c("Platelets", "Prothrombin")])
+```
+
+#### Stage
+
+As it has a relationship with the severity of the disease, we cannot convert it into a factor as stage is an ordinal variable, indicating different levels or stages of severity. As such, we'll use the median of the value.
+```{r stage_nan}
+df <- df |> mutate_at(
+  vars("Stage"),
+  ~ ifelse(is.na(.), median(., na.rm = TRUE), .)
+)
+
+summary(tibble(Stage = df$Stage))
+```
+
+### Factors
+
+As a last step, we'll change any character-based variable into a factor
+```{r as_factors}
+df <- df |> mutate_if(is.character, as.factor)
+
+summary(as.data.frame(df |> select(where(is.factor))))
+```
+
+
+Finally we can re-inspect the whole data
+```{r summary}
+summary(df)
+str(df)
+```
+
+## Case study
+
+### Categorical study
+
+First of all, let's see the number of patients of each type to see how they are distributed. This will be useful to be able to see how many
+patients of each stage present different symptoms.
+```{r hurr}
+ggplot(df, aes(x = Stage, fill = as.factor(Stage))) +
+  geom_bar(stat = "Count") +
+  geom_text(
+    stat = "Count",
+    aes(label = after_stat(count)),
+    vjust = 2
+  ) +
+  labs(
+    title = "Quantity of Cirrhosis Stage Data",
+    fill = "Stage"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The plot presents a left-skewed distributions of values. This could potentially hinder our model performace, as the data presents a clear unbalance of classes.
+
+There's also the merit of checking the distribution of values regarding our clasification variable `Status`
+
+```{r dist_state}
+ggplot(df, aes(x = Status, fill = as.factor(Status))) +
+  geom_bar(stat = "Count") +
+  geom_text(
+    stat = "Count",
+    aes(label = after_stat(count)),
+    vjust = 2
+  ) +
+  labs(
+    title = "Quantity of Patients per Status",
+    fill = "Status"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The dataset presents an imbalance with a ratio (257:161), having a nearly twofold difference in data volume. Such imbalances could hinder the model's effectiveness in predicting cases associated with the minority class. If the model's performance falls outside the expected range, we could consider the injection of synthetic data as a possible strategy to enhance predictive outcomes.
+
+Now we are going to look at each group of patients distributed by their stage to see how many of them consume a specific type of drug.
+
+```{r drug_histogram}
+ggplot(df, aes(x = Stage, fill = Drug)) +
+  geom_bar(stat = "count", position = "dodge") +
+  geom_text(
+    stat = "count",
+    aes(label = after_stat(count)),
+    position = position_dodge(width = 0.9),
+    vjust = -0.5
+  ) +
+  labs(
+    title = "Distribution of Medication by Cirrhosis Stage",
+    x = "Stage",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  guides(fill = guide_legend(title = "Medication"))
+```
+
+We can observe that the placebo and de D-penicillamine are distributed equally for all of the groups, the patients that don't take any drug are those who do not participate in the experiment. Furthermore, the amount of medication seems to be applied proportionally to the stage that the patient is summited to; Wich is expected for the amount of data that we possess.
+
+### Quantitative study
+
+Finally, we can provide the correlation matrix to observe the pairwise relationships between variables, allowing us to uncover patterns.
+```{r corr}
+ggcorr(
+  df |> select(-where(is.factor)),
+  label = TRUE,
+  label_round = 2,
+  hjust = 0.75,
+  angle = -45
+)
+```
+
+With this data, we can more tightly define what values are going to be used in our models. The selection will be purely by correlation overall significance (i.e. Age doesn't seem to be very correlated with any other value)
+
+```{r corr_sel}
+correlation_threshold <- 2
+
+corr_matrix <- cor(df |> select(-where(is.factor)))
+thresholds <- sapply(data.frame(corr_matrix), function(x) sum(abs(x)) - 1)
+threshold_names <- names(thresholds[thresholds > correlation_threshold])
+```
+
+We can finally create cleaned up dataframe that will be used for the training of the models
+
+```{r cleaned_df}
+cleaned_df <- df[, c(threshold_names, names(df |> select(where(is.factor))))]
+summary(cleaned_df)
+str(cleaned_df)
+```
+
+## Learning models
+
+### Data split
+
+It's always a best practice to verify the dimensions of both datasets. We are checking whether the split between the training and testing sets is consistent with the specified ratio. We will consider differences starting from the second decimal place onward, as small discrepancies may occur due to the representation of numbers in floating-point format.
+
+```{r check_dims}
+split_ratio <- 0.8
+data_split <- initial_split(cleaned_df, prop = split_ratio)
+
+ifelse(
+  all(c(
+    isTRUE(all.equal(
+      dim(training(data_split))[1],
+      dim(cleaned_df)[1] * split_ratio,
+      tolerance = 0.01
+    )),
+    isTRUE(all.equal(
+      dim(testing(data_split))[1],
+      dim(cleaned_df)[1] * (1 - split_ratio),
+      tolerance = 0.01
+    ))
+  )),
+  "They are roughly equal",
+  "Too much difference!"
+)
+```
+
+We'll use this method in a future function to agilize the process of testing with different train/test splits.
+
+### Utils
+
+As per the evaluation of each model, a helper function is employed, as implemented below. From there, two key metrics, accuracy and kap, are extracted:
+
+- Accuracy: Calculated as the ratio of correctly predicted instances to the total number of instances, quantifies the overall correctness of predictions.
+- Kappa (Kap): Statistical measure that assesses the level of agreement between observed and expected classifications. More information about the kappa metric can be found [here](https://en.wikipedia.org/wiki/Cohen%27s_kappa)
+
+```{r model_accuracy}
+model_accuracy <- function(model, train, test) {
+  pred <- model |>
+    fit(Status ~ ., data = train) |> # nolint
+    predict(test) |>
+    pull(.pred_class) # nolint
+
+  results <- test |>
+    mutate(predictions = pred) |> # nolint
+    metrics(truth = Status, estimate = predictions) |> # nolint
+    filter(.metric %in% c("accuracy", "kap")) |> # nolint
+    pivot_wider(names_from = .metric, values_from = .estimate) |> # nolint
+    select(accuracy, kap) # nolint
+
+  return(as.data.frame(results))
+}
+```
+
+To streamline the use of `model_accuracy`, the function `test_model` was crafted. It allows to assess the evaluation of a model by creating the train/test data split per call.
+
+```{r test_model}
+test_model <- function(model, data, split_ratio, seed) {
+  set.seed(seed)
+
+  data_split <- initial_split(data, prop = split_ratio) # nolint
+
+  return(model_accuracy(model, training(data_split), testing(data_split))) # nolint
+}
+```
+
+### Training
+
+We dediced to use the following models (and their parameter permutations):
+
+  - Logistic regression
+  - Linear SVM
+  - Radial basis function SVM
+  - Perceptron
+  - Decision tree
+  - K-nearest neighbor
+
+```{r models}
+models <- list(
+  logistic_reg(
+    engine = "glm"
+  ),
+  svm_linear(
+    engine = "kernlab",
+    mode = "classification"
+  ),
+  svm_rbf(
+    margin = 0.1,
+    engine = "kernlab",
+    mode = "classification"
+  ),
+  svm_rbf(
+    margin = 0.2,
+    engine = "kernlab",
+    mode = "classification"
+  ),
+  mlp(
+    epochs = 100,
+    hidden_units = 1, # Single perceptron in the hidden layer
+    engine = "nnet",
+    mode = "classification"
+  ),
+  decision_tree(
+    engine = "rpart",
+    mode = "classification"
+  ),
+  decision_tree(
+    min_n = 5,
+    engine = "rpart",
+    mode = "classification"
+  ),
+  decision_tree(
+    min_n = 8,
+    engine = "rpart",
+    mode = "classification"
+  ),
+  decision_tree(
+    min_n = 8,
+    engine = "rpart",
+    mode = "classification"
+  ),
+  nearest_neighbor(
+    neighbors = 5,
+    weight_func = "triangular",
+    engine = "kknn",
+    mode = "classification"
+  ),
+  nearest_neighbor(
+    neighbors = 10,
+    weight_func = "triangular",
+    engine = "kknn",
+    mode = "classification"
+  ),
+  nearest_neighbor(
+    neighbors = 15,
+    weight_func = "triangular",
+    engine = "kknn",
+    mode = "classification"
+  ),
+  nearest_neighbor(
+    neighbors = 5,
+    weight_func = "triangular",
+    engine = "kknn",
+    mode = "classification"
+  )
+)
+```
+
+Having the list of all models to test, we assess the performance of each under varying training-test splits. These splits range from 0.2 to 0.8, representing the data proportion of the training set.
+```{r learning, warning = FALSE}
+model_accuracies <- map_dfr(
+  lapply(
+    seq(0.2, 0.8, by = 0.1),
+    function(split) {
+      model_accuracies <- map_dfr(
+        map(models, ~ test_model(., cleaned_df, split, 27)),
+        bind_rows
+      ) |> mutate(index = row_number(), train_split = split)
+    }
+  ),
+  bind_rows
+)
+```
+
+### Model comparison
+
+Finalizing the study, a couple of graph will ge shown to compare the results and efficiency of all the models outcomes
+
+```{r acc_model_comparison}
+group_train_acc <- model_accuracies |>
+  group_by(train_split) |>
+  summarize(
+    mean_accuracy = mean(accuracy),
+    sd_accuracy = sd(accuracy),
+    se_accuracy = sd(accuracy) / sqrt(n())
+  )
+
+ggplot(group_train_acc, aes(x = as.factor(train_split), y = mean_accuracy)) +
+  geom_point(color = "skyblue", size = 3) +
+  geom_errorbar(
+    aes(ymin = mean_accuracy - se_accuracy, ymax = mean_accuracy + se_accuracy),
+    width = 0.2,
+    color = "skyblue",
+    linewidth = 1
+  ) +
+  geom_hline(
+    yintercept = max(group_train_acc$mean_accuracy),
+    color = "red",
+    linetype = "dashed"
+  ) +
+  geom_hline(
+    yintercept = min(group_train_acc$mean_accuracy),
+    color = "blue",
+    linetype = "dashed"
+  ) +
+  geom_text(aes(label = round(mean_accuracy, 3)), vjust = -1) +
+  labs(
+    title = "Mean Accuracy per Train Split",
+    x = "Train Split",
+    y = "Mean Accuracy"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+The dashed red and blue lines indicate the maximum and minimum mean accuracy, respectively. Based on the plot, it appears that the maximum mean accuracy is around the 0.7 train split value, suggesting that the best model is expected to perform well at approximately that split ratio.
+
+```{r ind_model_comparison}
+ggplot(model_accuracies, aes(x = as.factor(index), y = accuracy)) +
+  geom_boxplot(fill = "skyblue", color = "black", width = 0.5) +
+  labs(
+    title = "Accuracy per Train Split",
+    x = "Train Split",
+    y = "Mean Accuracy"
+  ) +
+  geom_hline(
+    yintercept = max(model_accuracies$accuracy),
+    color = "red",
+    linetype = "dashed"
+  ) +
+  geom_hline(
+    yintercept = min(model_accuracies$accuracy),
+    color = "blue",
+    linetype = "dashed"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Notably, the 5th model (perceptron) shows inconsistency in its accuracy values, even though it includes outlier models with the best accuracy. This inconsistency suggests that additional training data or adjustments may be needed to improve the overall performance of the perceptron model.
+
+The best overall model, having the most tight values is the 6th model (decision tree) having most of it's values aroung 0.775.
+
+### Best model
+
+Finally, we can retrive the index with the highest-performing model and show it's details.
+```{r best_model}
+(best_model <- model_accuracies
+  |> filter(accuracy == max(accuracy))
+)
+
+models[[best_model$index[1]]]
+```
+
+In this specific configuration, the best one was a Single Layer Neural Network Model Specification (Single perceptron model) with an accuracy of 82% using a datasplit of 0.7.
+
+Note that there's no such thing as the _best_ model overall and, in this specific case, we opted to label the best as the one that has the highest accuracy for the given data. One could argue that the model that gives the highest mean accuracy troughout the train/test split is the _best_ as its consistency prooves it robustness.
+
+
+## Conclusion
+
+In order to address the question stated by the assesment, a comprehensive examination of the dataset was undertaken. This involved a meticulous review and adaptation of the dataset as to obtain the most amout of usable data.
+
+Once the dataset was appropriately transformed, a careful selection of variables followed. This selection was guided by considerations such as strong inter-variable correlations and the significance of specific variables, ensuring the exclusion of superfluous information that would not contribute meaningfully to the study.
+
+Ultimately, with a refined dataset tailored to the study's requirements, the model generation process was issued. This involved training various models to predict the survival status of patients. Subsequently, the identification of the optimal model capable of fulfilling the predictive task was ascertained.
+
+## Additional notes
+
+Among all the models executed, the perceptron was the best one attaining an accuracy of 82%. Note that, knowing that this model **is** an outlier of the most inconsistent model, new data should be introduced to reassess the confidence of it. Nevertheless, within the context of the healthcare domain, it is imperative to exercise caution and consider this model as a guiding tool rather than an entirely reliable solution.
+
+Furthermore, it is crucial to acknowledge that alterations in model parameters can significantly influence the determination of the best-performing model. Consequently, confidence in the predictions of these may not carry substantial weight in this domain.
